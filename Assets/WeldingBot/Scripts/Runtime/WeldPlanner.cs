@@ -88,6 +88,11 @@ namespace WeldingBot
             public List<float> plateRadius = new List<float>();
             public float maxTop;
             public int collisionChecks, collisionHits;
+            // background planning: progress and cancellation
+            public volatile int progressDone, progressTotal;
+            public volatile bool cancel;
+            public float margin;   // extra clearance used while planning (verification uses 0)
+            public void CheckCancel() { if (cancel) throw new System.OperationCanceledException(); }
             public readonly Vector3[] pts = new Vector3[6];
         }
 
@@ -97,8 +102,10 @@ namespace WeldingBot
         static readonly float[] SegR = { 0.20f, 0.12f, 0.09f, 0.07f, 0.025f };
         const float TorchClear = 0.08f;
 
-        static readonly List<float[]> solBuf = new List<float[]>(8);
-        static readonly List<float> solCost = new List<float>(8);
+        [System.ThreadStatic] static List<float[]> solBufTS;
+        [System.ThreadStatic] static List<float> solCostTS;
+        static List<float[]> solBuf => solBufTS ??= new List<float[]>(8);
+        static List<float> solCost => solCostTS ??= new List<float>(8);
 
         /// <summary>Most comfortable IK solution that does not collide with the plates (tries every arm configuration).</summary>
         public static bool SolveFree(Context c, Vector3 basePos, Vector3 world, Quaternion worldRot, float[] result, out float cost)
@@ -135,7 +142,7 @@ namespace WeldingBot
             for (int sgi = 0; sgi < SegA.Length; sgi++)
             {
                 Vector3 a = pts[SegA[sgi]], b = pts[SegB[sgi]];
-                float r = SegR[sgi];
+                float r = SegR[sgi] + (sgi == SegA.Length - 1 ? 0f : c.margin);   // the torch may come close to the joint
                 if (sgi == SegA.Length - 1) b -= (b - a).normalized * TorchClear;
                 float len = (b - a).magnitude;
                 for (int k = 0; k < c.plates.Count; k++)
@@ -283,6 +290,7 @@ namespace WeldingBot
         {
             foreach (var prof in AngleProfiles)
             {
+                c.CheckCancel();
                 var sp = BestPlan(c, s, rev, prof);
                 if (sp != null) return sp;
             }

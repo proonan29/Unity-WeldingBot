@@ -211,6 +211,23 @@ namespace WeldingBot.EditorTools
             return Summary(s);
         }
 
+        [CliCommand("wb_load_job_async", "Play mode: load a job the way the UI does (plan on a background thread). Returns immediately; poll wb_sim_status.")]
+        public static string LoadJobAsync([CliArg("job", "Job preset (wb_list_jobs)")] string job,
+            [CliArg("wait_ms", "Wait up to this long for the plan (0 = return immediately)")] int waitMs = 0)
+        {
+            var app = PlayApp(out var e); if (app == null) return e;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            app.LoadJobAsync(job);
+            float returnedAfter = (float)sw.Elapsed.TotalMilliseconds;
+            string r = $"started job={app.jobName} returned_after={F(returnedAfter)}ms planning={app.IsPlanning}";
+            if (waitMs > 0)
+            {
+                var s = app.WaitForPlan(waitMs);
+                r += s != null ? $" | done after {F((float)sw.Elapsed.TotalMilliseconds)}ms: " + Summary(s) : " | still planning";
+            }
+            return r;
+        }
+
         // ------------------------------------------------------------------ analysis (no scene changes)
 
         public static string Summary(WeldSession s)
@@ -224,7 +241,7 @@ namespace WeldingBot.EditorTools
                    $"gantry_moves={st.gantryMoves} gantry_dist={F(st.gantryDistance)}m gantry_time={WeldingBotUI.Hms(st.gantryTime)} " +
                    $"stations={st.stations} tracked={st.trackedSeams} air={WeldingBotUI.Hms(st.airTime)} wire={F(st.wireKg)}kg " +
                    $"pos[1/2/3/4]={F(st.lengthByPosition[0])}/{F(st.lengthByPosition[1])}/{F(st.lengthByPosition[2])}/{F(st.lengthByPosition[3])}m " +
-                   $"plan_ms={F(st.planningMs)} unsafe_air_moves={st.unsafeAirMoves} collision_checks={s.ctx.collisionChecks} rejected={s.ctx.collisionHits}";
+                   $"plan_ms={F(st.planningMs)} unsafe_air_moves={st.unsafeAirMoves} gantry_lifts={st.gantryLifts} collision_checks={s.ctx.collisionChecks} rejected={s.ctx.collisionHits}";
         }
 
         static WeldSession Headless(string job)
@@ -285,6 +302,7 @@ namespace WeldingBot.EditorTools
             var lim = s.ctx.lim;
             bool limitsOk = true;
             int n = 0, collide = 0, airCollide = 0;
+            string airInfo = null;
             float dt = 0.05f;
             for (float t = 0f; t <= s.timeline.Duration; t += dt)
             {
@@ -293,7 +311,7 @@ namespace WeldingBot.EditorTools
                 if (prev != null) maxJump = Mathf.Max(maxJump, RobotKinematics.MaxDelta(prev, st.q, 6) / dt);
                 prev = (float[])st.q.Clone();
                 bool path = st.kind == MotionKind.Weld || st.kind == MotionKind.Approach || st.kind == MotionKind.Retract;
-                if (WeldPlanner.Collides(s.ctx, st.basePos, st.q)) { if (path) collide++; else airCollide++; }
+                if (WeldPlanner.Collides(s.ctx, st.basePos, st.q)) { if (path) collide++; else { airCollide++; if (airInfo == null) airInfo = $"{st.kind}@{WeldingBotUI.Hms(t)}"; } }
                 if (st.kind != MotionKind.Weld) continue;
                 var sp = s.planOf[st.seam];
                 Vector3 target = Vector3.Lerp(sp.p0, sp.p1, st.progress / sp.length);
@@ -304,7 +322,7 @@ namespace WeldingBot.EditorTools
                 maxAng = Mathf.Max(maxAng, Vector3.Angle(wr * Vector3.forward, sp.AxisAt(st.progress / sp.length)));
                 n++;
             }
-            return $"verify: samples={n} tcp_err_max={F(maxErr * 1000f)}mm axis_err_max={F(maxAng)}deg max_joint_speed={F(maxJump)}deg/s gantry_in_limits={limitsOk} collision_samples={collide} air_move_collision_samples={airCollide}";
+            return $"verify: samples={n} tcp_err_max={F(maxErr * 1000f)}mm axis_err_max={F(maxAng)}deg max_joint_speed={F(maxJump)}deg/s gantry_in_limits={limitsOk} collision_samples={collide} air_move_collision_samples={airCollide}{(airInfo != null ? " first=" + airInfo : "")}";
         }
 
         [CliCommand("wb_ik_test", "Random FK -> IK -> FK round trips for the robot kinematics.")]
@@ -454,7 +472,8 @@ namespace WeldingBot.EditorTools
         {
             var app = App(out var e); if (app == null) return e;
             var r = app.runner; var s = r.Session;
-            if (s == null) return "no session";
+            if (app.IsPlanning) return $"planning job={app.PlanningJob} progress={F(100f * app.PlanningProgress)}% frame={Time.frameCount}";
+            if (s == null) return "no session" + (app.LastError != null ? " error=" + app.LastError : "");
             var live = s.StatsAt(r.simTime);
             var st = r.State;
             return $"running={r.running} finished={r.Finished} speed={F(r.speed)}x t={WeldingBotUI.Hms(r.simTime)}/{WeldingBotUI.Hms(r.Duration)} " +

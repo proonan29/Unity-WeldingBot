@@ -34,7 +34,8 @@ namespace WeldingBot
         static readonly Vector3[] Axes = { Vector3.up, Vector3.right, Vector3.right, Vector3.forward, Vector3.right, Vector3.forward };
         public static Vector3 Axis(int i) => Axes[i];
         static readonly float[] ContW = { 1f, 1f, 1f, 0.6f, 0.6f, 0.3f };
-        static readonly List<float[]> buf = new List<float[]>(8);
+        [System.ThreadStatic] static List<float[]> bufTS;
+        static List<float[]> buf => bufTS ??= new List<float[]>(8);
 
         public static void FK(RobotGeom g, float[] q, out Vector3 pos, out Quaternion rot, out Vector3 wrist)
         {

@@ -49,6 +49,7 @@ namespace WeldingBot.UI
             if (app != null)
             {
                 app.JobLoaded += OnJobLoaded;
+                app.PlanningStarted += OnPlanningStarted;
                 if (app.cameraRig != null) app.cameraRig.isOverUI = IsOverPanel;
             }
             OnJobLoaded();
@@ -150,7 +151,7 @@ namespace WeldingBot.UI
             jobDrop.RegisterValueChangedCallback(e =>
             {
                 int i = names.IndexOf(e.newValue);
-                if (i >= 0 && app != null) app.LoadJob(JobPresets.Names[i]);
+                if (i >= 0 && app != null) app.LoadJobAsync(JobPresets.Names[i]);
             });
             sj.Add(jobDrop);
             jobDesc = L("", 12, Dim); sj.Add(jobDesc);
@@ -274,6 +275,20 @@ namespace WeldingBot.UI
             RefreshButtons();
         }
 
+        void OnPlanningStarted()
+        {
+            if (!built || app == null) return;
+            var job = JobPresets.Get(app.jobName);
+            int idx = System.Array.IndexOf(JobPresets.Names, job.name);
+            if (idx >= 0) jobDrop.SetValueWithoutNotify(jobDrop.choices[idx]);
+            jobDesc.text = Loc.T(job.description);
+            jobInfo.text = Loc.T("Planning gantry stations and robot paths...");
+            seamRows.Clear();
+            seamLabels.Clear();
+            summaryRows.Clear();
+            nextRefresh = 0f;
+        }
+
         void OnJobLoaded()
         {
             if (!built || app == null || app.Session == null) return;
@@ -339,9 +354,21 @@ namespace WeldingBot.UI
 
         void Update()
         {
-            if (!built || app == null || app.runner == null || app.Session == null) return;
+            if (!built || app == null || app.runner == null) return;
             if (Time.unscaledTime < nextRefresh) return;
             nextRefresh = Time.unscaledTime + 0.2f;
+            if (app.IsPlanning)
+            {
+                float p = app.PlanningProgress;
+                progressFill.style.width = Length.Percent(100f * p);
+                status.text = $"{Loc.T("Planning")}  {100f * p:0}%";
+                timeLabel.text = Loc.T(app.PlanningJob);
+                startBtn.SetEnabled(false);
+                return;
+            }
+            startBtn.SetEnabled(true);
+            if (!string.IsNullOrEmpty(app.LastError)) { status.text = "Error: " + app.LastError; return; }
+            if (app.Session == null) return;
             Refresh();
         }
 
@@ -384,6 +411,7 @@ namespace WeldingBot.UI
             AddRow(Loc.T("Fixed stations"), $"{s.stats.stations}");
             AddRow(Loc.T("Tracked seams"), $"{s.stats.trackedSeams}");
             AddRow(Loc.T("Robot air time"), Hms(live.airTime + live.approachTime));
+            AddRow(Loc.T("Gantry lifts"), $"{s.stats.gantryLifts}");
             AddRow(Loc.T("Wire used"), $"{live.wireKg:0.00} / {s.stats.wireKg:0.00} kg");
             AddRow(Loc.T("By position"),
                 $"1:{F1(live.lengthByPosition[0])} 2:{F1(live.lengthByPosition[1])} 3:{F1(live.lengthByPosition[2])} 4:{F1(live.lengthByPosition[3])} m");

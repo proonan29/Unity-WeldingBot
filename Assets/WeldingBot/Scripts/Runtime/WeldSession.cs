@@ -15,6 +15,7 @@ namespace WeldingBot
         public float ArcRatio => totalTime > 0f ? arcTime / totalTime : 0f;
         public float planningMs;
         public int unsafeAirMoves;      // air moves for which no collision-free route was found
+        public int gantryLifts;         // air moves resolved by raising the mast
     }
 
     /// <summary>Everything about one job: plates → seams → plan → deterministic timeline.</summary>
@@ -29,11 +30,15 @@ namespace WeldingBot
         public WeldStats stats = new WeldStats();
         public WeldPlanner.Context ctx;
 
-        public static WeldSession Build(WeldJob job, RobotGeom geom, GantryLimits lim, WeldParams wp)
+        public static WeldSession Build(WeldJob job, RobotGeom geom, GantryLimits lim, WeldParams wp, WeldPlanner.Context ctx = null)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var s = new WeldSession { job = job, seams = SeamExtractor.Extract(job.plates) };
-            var c = s.ctx = new WeldPlanner.Context { geom = geom, lim = lim, wp = wp };
+            var c = s.ctx = ctx ?? new WeldPlanner.Context();
+            c.geom = geom; c.lim = lim; c.wp = wp;
+            c.progressTotal = s.seams.Count * 2;
+            c.margin = 0.01f;
+            c.progressDone = 0;
             foreach (var p in job.plates)
             {
                 var b = p.WorldBounds();
@@ -47,6 +52,8 @@ namespace WeldingBot
             var options = new Dictionary<int, List<SeamPlan>>();
             foreach (var seam in s.seams)
             {
+                c.CheckCancel();
+                c.progressDone++;
                 var list = new List<SeamPlan>();
                 bool vertical = seam.position == WeldPosition.Vertical;
                 bool upIsForward = seam.p1.y >= seam.p0.y;
@@ -69,6 +76,8 @@ namespace WeldingBot
             var remaining = new List<int>(options.Keys);
             while (remaining.Count > 0)
             {
+                c.CheckCancel();
+                c.progressDone++;
                 SeamPlan best = null; float bestCost = float.MaxValue; bool bestReuse = false;
                 foreach (var id in remaining)
                 {
@@ -104,6 +113,7 @@ namespace WeldingBot
             }
             else s.timeline.Add(new Dwell { kind = MotionKind.Idle, basePos = lim.home, q = park, dur = 0.01f });
 
+            c.margin = 0f;
             s.ComputeStats();
             s.stats.planningMs = (float)sw.Elapsed.TotalMilliseconds;
             return s;
@@ -118,7 +128,10 @@ namespace WeldingBot
 
         bool JointPathCollides(Vector3 b, float[] qa, float[] qb)
         {
-            int n = Mathf.Max(2, Mathf.CeilToInt(RobotKinematics.MaxDelta(qa, qb, 6) / 4f) + 1);
+            // ~1 cm of tool travel between samples: 1° of a main axis moves the tool up to ~4 cm, 1° of a wrist axis ~1 cm
+            float arm = RobotKinematics.MaxDelta(qa, qb, 3);
+            float wrist = Mathf.Max(Mathf.Abs(qa[3] - qb[3]), Mathf.Abs(qa[4] - qb[4]), Mathf.Abs(qa[5] - qb[5]));
+            int n = Mathf.Max(2, Mathf.CeilToInt(arm * 4f + wrist) + 1);
             var q = new float[6];
             for (int i = 0; i < n; i++)
             {
@@ -165,8 +178,40 @@ namespace WeldingBot
             }
             if (!JointPathCollides(b, qa, park) && !JointPathCollides(b, park, qb))
             { AddAir(b, qa, park, kind, seam); AddAir(b, park, qb, kind, seam); return; }
+            if (TryGantryLift(b, qa, qb, kind, seam)) { stats.gantryLifts++; return; }
             stats.unsafeAirMoves++;
             AddAir(b, qa, qb, kind, seam);
+        }
+
+        bool BaseMoveCollides(Vector3 a, Vector3 b, float[] q)
+        {
+            int n = Mathf.Max(2, Mathf.CeilToInt((b - a).magnitude / 0.025f) + 1);
+            for (int i = 0; i < n; i++)
+                if (WeldPlanner.Collides(ctx, Vector3.Lerp(a, b, i / (float)(n - 1)), q)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Raise the mast with the arm frozen, reconfigure the arm high above the plates, lower again.
+        /// High enough that nothing of the arm can reach the plates, so the reconfiguration is always free.
+        /// </summary>
+        bool TryGantryLift(Vector3 b, float[] qa, float[] qb, MotionKind kind, int seam)
+        {
+            var lim = ctx.lim;
+            float full = ctx.maxTop + ctx.geom.Reach + ctx.geom.d1 + ctx.geom.d6 + ctx.geom.tool + 0.2f;
+            foreach (var dy in new[] { 0.6f, 1.2f, 2.0f, full - b.y })
+            {
+                float y = Mathf.Min(b.y + dy, lim.max.y);
+                if (y <= b.y + 0.05f) continue;
+                var up = new Vector3(b.x, y, b.z);
+                if (BaseMoveCollides(b, up, qa) || JointPathCollides(up, qa, qb) || BaseMoveCollides(up, b, qb)) continue;
+                float t = GantryLimits.AxisTime(y - b.y, lim.speed.y, lim.accel);
+                timeline.Add(new SampledMotion { kind = kind, seam = seam, base0 = b, base1 = up, qs = new[] { (float[])qa.Clone(), (float[])qa.Clone() }, dur = t });
+                AddAir(up, qa, qb, kind, seam);
+                timeline.Add(new SampledMotion { kind = kind, seam = seam, base0 = up, base1 = b, qs = new[] { (float[])qb.Clone(), (float[])qb.Clone() }, dur = t });
+                return true;
+            }
+            return false;
         }
 
         void AddGantry(Vector3 a, Vector3 b, float[] park)

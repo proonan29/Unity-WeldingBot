@@ -71,7 +71,7 @@ namespace WeldingBot
         public void Apply()
         {
             Shader.SetGlobalFloat("_WB_SimTime", simTime);
-            if (Session == null) return;
+            if (Session == null) { if (effects != null) effects.SetArc(false); return; }
             Session.timeline.Evaluate(simTime, State);
             if (gantry != null) gantry.SetBase(State.basePos);
             if (robot != null) robot.SetJoints(State.q);
